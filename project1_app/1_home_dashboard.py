@@ -73,12 +73,14 @@ with col3:
 # -----------------------------------------------------------------------------
 st.subheader("Recent Mailing Requests")
 
+# Added m.completion_date and combined first/last name
 recent_mailings_query = """
     SELECT 
-        c.last_name AS "Counselor",
+        c.first_name || ' ' || c.last_name AS "Counselor",
         m.destination_address AS "Destination",
         m.requested_arrival_date AS "Needed By",
-        m.status AS "Status"
+        m.status AS "Status",
+        m.completion_date AS "Completion Date"
     FROM mailings m
     JOIN counselors c ON m.counselor_id = c.id
     ORDER BY m.id DESC
@@ -90,7 +92,7 @@ recent_data, columns = fetch_data(recent_mailings_query)
 if recent_data:
     df_recent = pd.DataFrame(recent_data, columns=columns)
     
-    # Optional: Apply some basic styling to the dataframe
+    # Render the dataframe cleanly without the index column
     st.dataframe(
         df_recent, 
         use_container_width=True, 
@@ -98,3 +100,4 @@ if recent_data:
     )
 else:
     st.info("No recent mailing requests found in the system.")
+    
