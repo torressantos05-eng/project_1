@@ -1,139 +1,132 @@
 import streamlit as st
 import psycopg2
-from psycopg2 import sql
+import pandas as pd
 
-st.set_page_config(page_title="Manage Inventory", layout="wide")
-st.title("Manage Inventory")
+# -----------------------------------------------------------------------------
+# Database Helper Function
+# -----------------------------------------------------------------------------
+def execute_query(query, params=None, fetch=False):
+    """
+    Executes a query, handles the connection gracefully, and optionally fetches data.
+    """
+    conn = None
+    try:
+        conn = psycopg2.connect(st.secrets["DB_URL"])
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            
+            if fetch:
+                result = cur.fetchall()
+                columns = [desc[0] for desc in cur.description] if cur.description else []
+                conn.commit()
+                return result, columns
+            
+            conn.commit()
+            return True, None
+    except Exception as e:
+        st.error(f"Database Error: {e}")
+        return None, None
+    finally:
+        if conn is not None:
+            conn.close()
 
-# ── DB connection ──────────────────────────────────────────────────────────────
-def get_conn():
-    return psycopg2.connect(st.secrets["DB_URL"])
+# -----------------------------------------------------------------------------
+# 1. Page Title
+# -----------------------------------------------------------------------------
+st.title("Manage Item Catalog")
 
-# ── 1. ADD MATERIAL FORM ───────────────────────────────────────────────────────
-st.subheader("Add New Material")
+# -----------------------------------------------------------------------------
+# 2. Add Material Form
+# -----------------------------------------------------------------------------
+st.header("Add New Item", divider="gray")
 
 with st.form("add_material_form", clear_on_submit=True):
-    item_name = st.text_input("Item Name *")
-    category = st.text_input("Category")
-    quantity = st.number_input("Quantity in Stock", min_value=0, step=1, value=0)
-    submitted = st.form_submit_button("Add Material")
+    col1, col2 = st.columns(2)
+    with col1:
+        item_name = st.text_input("Item Name *")
+    with col2:
+        category = st.text_input("Category")
+        
+    submitted = st.form_submit_button("Add Item")
 
-if submitted:
-    if not item_name.strip():
-        st.error("Item Name cannot be blank.")
-    else:
-        try:
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO materials (item_name, category, quantity_in_stock) VALUES (%s, %s, %s)",
-                (item_name.strip(), category.strip() or None, quantity),
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
-            st.success(f"✅ '{item_name.strip()}' added successfully!")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Database error: {e}")
+    if submitted:
+        # Validation
+        if not item_name.strip():
+            st.error("Item Name is a required field.")
+        else:
+            # Parameterized Insert
+            insert_query = """
+                INSERT INTO materials (item_name, category)
+                VALUES (%s, %s)
+            """
+            success, _ = execute_query(insert_query, (item_name.strip(), category.strip()))
+            
+            if success:
+                st.success(f"Item '{item_name}' added to the catalog successfully!")
+                st.rerun()
 
-st.divider()
+# -----------------------------------------------------------------------------
+# 3. Current Catalog Table
+# -----------------------------------------------------------------------------
+st.header("Current Catalog", divider="gray")
 
-# ── 2. CURRENT INVENTORY ───────────────────────────────────────────────────────
-st.subheader("Current Inventory")
+select_all_query = "SELECT id, item_name, category FROM materials ORDER BY id;"
+data, columns = execute_query(select_all_query, fetch=True)
 
-def fetch_all():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT id, item_name, category, quantity_in_stock FROM materials ORDER BY id")
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return rows
-
-try:
-    rows = fetch_all()
-    if rows:
-        import pandas as pd
-        df = pd.DataFrame(rows, columns=["ID", "Item Name", "Category", "Quantity in Stock"])
-        st.dataframe(df, use_container_width=True, hide_index=True)
-    else:
-        st.info("No materials found. Add one above.")
-except Exception as e:
-    st.error(f"Could not load inventory: {e}")
-    rows = []
-
-st.divider()
-
-# ── 3. UPDATE MATERIAL ─────────────────────────────────────────────────────────
-st.subheader("Update Material")
-
-def fetch_item(item_id):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id, item_name, category, quantity_in_stock FROM materials WHERE id = %s",
-        (item_id,),
+if data:
+    df = pd.DataFrame(data, columns=columns)
+    # Display only the relevant columns to the user
+    display_df = df[["item_name", "category"]].rename(
+        columns={"item_name": "Item Name", "category": "Category"}
     )
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return row
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+else:
+    st.info("No items found in the catalog.")
+    df = pd.DataFrame()
 
-try:
-    if not rows:
-        st.info("No materials available to edit.")
-    else:
-        # Build selectbox options from current data
-        options = {f"{r[1]} (ID: {r[0]})": r[0] for r in rows}
-        selected_label = st.selectbox("Select a material to edit", list(options.keys()))
-        selected_id = options[selected_label]
+# -----------------------------------------------------------------------------
+# 4. Update Material
+# -----------------------------------------------------------------------------
+if not df.empty:
+    st.header("Modify Existing Item", divider="gray")
+    
+    # Create a dictionary for the selectbox mapping for clean UI
+    # Example format: "ID: 1 | Brochures (Marketing)"
+    item_dict = {f"ID: {row[0]} | {row[1]} ({row[2] or 'No Category'})": row for row in data}
+    
+    selected_option = st.selectbox(
+        "Select an item to edit:", 
+        options=["-- Select an Item --"] + list(item_dict.keys())
+    )
 
-        # Fetch current values for pre-population
-        current = fetch_item(selected_id)
-
-        if current:
-            with st.form("update_material_form"):
-                st.markdown(f"**Editing:** {current[1]}")
-                new_name = st.text_input("Item Name *", value=current[1])
-                new_category = st.text_input("Category", value=current[2] or "")
-                new_quantity = st.number_input(
-                    "Quantity in Stock",
-                    min_value=0,
-                    step=1,
-                    value=int(current[3]),
-                )
-                update_submitted = st.form_submit_button("Update Material")
-
+    if selected_option != "-- Select an Item --":
+        # Extract the selected item's current data
+        m_id, m_name, m_category = item_dict[selected_option]
+        
+        with st.form("edit_material_form"):
+            e_col1, e_col2 = st.columns(2)
+            with e_col1:
+                new_name = st.text_input("Item Name *", value=m_name)
+            with e_col2:
+                # Handle None values for category smoothly
+                new_category = st.text_input("Category", value=m_category if m_category else "")
+            
+            update_submitted = st.form_submit_button("Update Item")
+            
             if update_submitted:
                 if not new_name.strip():
                     st.error("Item Name cannot be blank.")
                 else:
-                    try:
-                        conn = get_conn()
-                        cur = conn.cursor()
-                        cur.execute(
-                            """
-                            UPDATE materials
-                            SET item_name = %s,
-                                category = %s,
-                                quantity_in_stock = %s
-                            WHERE id = %s
-                            """,
-                            (
-                                new_name.strip(),
-                                new_category.strip() or None,
-                                new_quantity,
-                                selected_id,
-                            ),
-                        )
-                        conn.commit()
-                        cur.close()
-                        conn.close()
-                        st.success(f"✅ Material updated successfully!")
+                    update_query = """
+                        UPDATE materials
+                        SET item_name = %s, category = %s
+                        WHERE id = %s
+                    """
+                    success, _ = execute_query(
+                        update_query, 
+                        (new_name.strip(), new_category.strip(), m_id)
+                    )
+                    if success:
+                        st.success("Item updated successfully!")
                         st.rerun()
-                    except Exception as e:
-                        st.error(f"Database error: {e}")
-
-except Exception as e:
-    st.error(f"Could not load update section: {e}")
+                        
