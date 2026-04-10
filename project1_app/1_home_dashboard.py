@@ -1,103 +1,100 @@
-# pages/1_Home_Dashboard.py
-
 import streamlit as st
 import psycopg2
-import psycopg2.extras
-from datetime import date
+import pandas as pd
 
-# ── Page config ───────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Home Dashboard", page_icon="📬", layout="wide")
-
-# ── DB connection helper ───────────────────────────────────────────────────────
-@st.cache_resource
+# -----------------------------------------------------------------------------
+# Database Helper Functions
+# -----------------------------------------------------------------------------
 def get_connection():
-    """Create (and cache) a single psycopg2 connection for the session."""
+    """Returns a psycopg2 connection using Streamlit secrets."""
     try:
-        conn = psycopg2.connect(st.secrets["DB_URL"])
-        return conn
-    except psycopg2.OperationalError as e:
-        st.error(f"⚠️ Could not connect to the database: {e}")
-        st.stop()
+        return psycopg2.connect(st.secrets["DB_URL"])
+    except Exception as e:
+        st.error(f"Failed to connect to the database: {e}")
+        return None
 
-def run_query(sql: str, params=None):
-    """Run a SELECT and return rows as a list of dicts. Re-raises on error."""
+def fetch_data(query, params=None):
+    """Executes a SELECT query and returns the data and column names."""
     conn = get_connection()
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, params)
-        return cur.fetchall()
+    if not conn:
+        return [], []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            data = cur.fetchall()
+            cols = [desc[0] for desc in cur.description] if cur.description else []
+            return data, cols
+    except Exception as e:
+        st.error(f"Database Query Error: {e}")
+        return [], []
+    finally:
+        if conn:
+            conn.close()
 
-# ── Page header ───────────────────────────────────────────────────────────────
-st.title("📬 Recruitment Travel — Home Dashboard")
-st.markdown(
-    """
-    Welcome to the **Recruitment Travel** management system. Use this dashboard
-    to monitor mailing requests, track inventory levels, and manage counselor
-    territories — all in one place.
-    """
-)
+def get_single_value(query):
+    """Helper to fetch a single scalar value (like a COUNT)."""
+    data, _ = fetch_data(query)
+    if data and data[0]:
+        return data[0][0]
+    return 0
+
+# -----------------------------------------------------------------------------
+# 1. Page Title & Welcome
+# -----------------------------------------------------------------------------
+st.title("📦 Recruitment Travel Dashboard")
+st.markdown("Welcome to the Recruitment Travel mailing management system. Here is a high-level overview of current mailing requests and active personnel.")
+
 st.divider()
 
-# ── Metric cards ──────────────────────────────────────────────────────────────
-try:
-    pending_rows   = run_query("SELECT COUNT(*) AS n FROM mailings WHERE status = 'Pending'")
-    completed_rows = run_query("SELECT COUNT(*) AS n FROM mailings WHERE status = 'Completed'")
-    low_stock_rows = run_query("SELECT COUNT(*) AS n FROM materials WHERE quantity_in_stock < 50")
+# -----------------------------------------------------------------------------
+# 2. Key Metrics
+# -----------------------------------------------------------------------------
+# Fetch counts from the database
+pending_query = "SELECT COUNT(*) FROM mailings WHERE status = 'Pending';"
+completed_query = "SELECT COUNT(*) FROM mailings WHERE status = 'Completed';"
+active_counselors_query = "SELECT COUNT(*) FROM counselors WHERE is_active = true;"
 
-    pending_count   = pending_rows[0]["n"]   if pending_rows   else 0
-    completed_count = completed_rows[0]["n"] if completed_rows else 0
-    low_stock_count = low_stock_rows[0]["n"] if low_stock_rows else 0
+total_pending = get_single_value(pending_query)
+total_sent = get_single_value(completed_query)
+total_active = get_single_value(active_counselors_query)
 
-except Exception as e:
-    st.error(f"⚠️ Failed to load metrics: {e}")
-    pending_count = completed_count = low_stock_count = 0
-
+# Display metrics in 3 columns
 col1, col2, col3 = st.columns(3)
 
-col1.metric(
-    label="📋 Total Pending Requests",
-    value=pending_count,
-    help="Mailings currently waiting to be fulfilled.",
-)
-col2.metric(
-    label="✅ Packages Sent",
-    value=completed_count,
-    help="Mailings that have been marked Completed.",
-)
-col3.metric(
-    label="⚠️ Low Stock Alerts",
-    value=low_stock_count,
-    help="Materials with fewer than 50 units remaining.",
-)
+with col1:
+    st.metric("Total Pending Requests", total_pending)
+with col2:
+    st.metric("Packages Sent", total_sent)
+with col3:
+    st.metric("Total Active Counselors", total_active)
 
-st.divider()
+# -----------------------------------------------------------------------------
+# 3. Recent Mailing Requests Table
+# -----------------------------------------------------------------------------
+st.subheader("Recent Mailing Requests")
 
-# ── Recent mailing requests table ─────────────────────────────────────────────
-st.subheader("🕐 10 Most Recent Mailing Requests")
-
-RECENT_MAILINGS_SQL = """
-    SELECT
-        c.last_name                                  AS "Counselor",
-        m.destination_address                        AS "Destination Address",
-        TO_CHAR(m.requested_arrival_date, 'Mon DD, YYYY') AS "Requested Arrival",
-        m.status                                     AS "Status"
-    FROM   mailings   m
-    JOIN   counselors c ON c.id = m.counselor_id
-    ORDER  BY m.id DESC
-    LIMIT  10;
+recent_mailings_query = """
+    SELECT 
+        c.last_name AS "Counselor",
+        m.destination_address AS "Destination",
+        m.requested_arrival_date AS "Needed By",
+        m.status AS "Status"
+    FROM mailings m
+    JOIN counselors c ON m.counselor_id = c.id
+    ORDER BY m.id DESC
+    LIMIT 10;
 """
 
-try:
-    rows = run_query(RECENT_MAILINGS_SQL)
+recent_data, columns = fetch_data(recent_mailings_query)
 
-    if rows:
-        # Convert list-of-dicts to a plain list-of-dicts Streamlit can render
-        st.dataframe(
-            data=[dict(r) for r in rows],
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.info("No mailing requests found yet.")
-
-except Exception as e:
-    st.error(f"⚠️ Failed to load recent mailings: {e}")
+if recent_data:
+    df_recent = pd.DataFrame(recent_data, columns=columns)
+    
+    # Optional: Apply some basic styling to the dataframe
+    st.dataframe(
+        df_recent, 
+        use_container_width=True, 
+        hide_index=True
+    )
+else:
+    st.info("No recent mailing requests found in the system.")
