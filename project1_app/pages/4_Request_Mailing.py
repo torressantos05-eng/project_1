@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import date
 
 # -----------------------------------------------------------------------------
-# Database Connection Helper
+# Database Helper Functions
 # -----------------------------------------------------------------------------
 def get_connection():
     """Returns a psycopg2 connection using Streamlit secrets."""
@@ -14,8 +14,8 @@ def get_connection():
         st.error(f"Failed to connect to the database: {e}")
         return None
 
-# Helper to run simple fetch queries
 def fetch_data(query, params=None):
+    """Helper to run simple fetch queries."""
     conn = get_connection()
     if not conn: return [], []
     try:
@@ -28,7 +28,8 @@ def fetch_data(query, params=None):
         st.error(f"Query Error: {e}")
         return [], []
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 # -----------------------------------------------------------------------------
 # Page UI & Logic
@@ -36,12 +37,16 @@ def fetch_data(query, params=None):
 st.title("Request a Mailing")
 
 # 1. Fetch Active Counselors
-counselor_data, _ = fetch_data("SELECT id, first_name, last_name FROM counselors WHERE is_active = true ORDER BY last_name, first_name;")
+counselor_data, _ = fetch_data(
+    "SELECT id, first_name, last_name FROM counselors WHERE is_active = true ORDER BY last_name, first_name;"
+)
 counselor_options = {f"{row[1]} {row[2]} (ID: {row[0]})": row[0] for row in counselor_data}
 
-# 2. Fetch Available Materials
-materials_data, _ = fetch_data("SELECT id, item_name, quantity_in_stock FROM materials WHERE quantity_in_stock > 0 ORDER BY item_name;")
-material_options = {row[1]: {"id": row[0], "stock": row[2]} for row in materials_data}
+# 2. Fetch Available Materials (No inventory tracking, just the catalog)
+materials_data, _ = fetch_data(
+    "SELECT id, item_name FROM materials ORDER BY item_name;"
+)
+material_options = {row[1]: row[0] for row in materials_data}
 
 st.header("New Mailing Request", divider="gray")
 
@@ -49,10 +54,10 @@ st.header("New Mailing Request", divider="gray")
 if not counselor_options:
     st.warning("No active counselors found. Please add or activate a counselor first.")
 elif not material_options:
-    st.warning("No materials currently in stock.")
+    st.warning("No materials currently available in the catalog.")
 else:
     # -------------------------------------------------------------------------
-    # 3. Dynamic Request "Form" (Using standard inputs for dynamic reactivity)
+    # 3. Dynamic Request Form
     # -------------------------------------------------------------------------
     selected_counselor = st.selectbox("Select Counselor *", options=["-- Select --"] + list(counselor_options.keys()))
     destination_address = st.text_area("Destination Address *")
@@ -65,9 +70,8 @@ else:
     if selected_materials:
         st.markdown("**Specify Quantities:**")
         for mat in selected_materials:
-            stock = material_options[mat]["stock"]
-            # Enforce max value based on stock
-            quantities[mat] = st.number_input(f"{mat} (Max: {stock})", min_value=0, max_value=stock, value=0, step=1)
+            # Minimum quantity is 1 since we are no longer bounded by stock
+            quantities[mat] = st.number_input(f"Quantity for {mat}", min_value=1, value=1, step=1)
 
     submitted = st.button("Submit Request", type="primary")
 
@@ -79,8 +83,6 @@ else:
             st.error("Destination address cannot be blank.")
         elif not selected_materials:
             st.error("Please select at least one material.")
-        elif sum(quantities.values()) == 0:
-            st.error("At least one selected material must have a quantity greater than 0.")
         else:
             # 5. Database Insertion (Transaction)
             counselor_id = counselor_options[selected_counselor]
@@ -98,15 +100,14 @@ else:
                         cur.execute(insert_mailing_sql, (counselor_id, destination_address.strip(), requested_arrival_date))
                         new_mailing_id = cur.fetchone()[0]
 
-                        # Insert into mailing_items for each valid selection
+                        # Insert into mailing_items for each selected material
                         insert_item_sql = """
                             INSERT INTO mailing_items (mailing_id, material_id, quantity_sent)
                             VALUES (%s, %s, %s);
                         """
                         for mat, qty in quantities.items():
-                            if qty > 0:
-                                mat_id = material_options[mat]["id"]
-                                cur.execute(insert_item_sql, (new_mailing_id, mat_id, qty))
+                            mat_id = material_options[mat]
+                            cur.execute(insert_item_sql, (new_mailing_id, mat_id, qty))
                         
                         # Commit the transaction
                         conn.commit()
@@ -114,7 +115,7 @@ else:
                         st.rerun() # Refresh to clear inputs and update the table below
                 
                 except Exception as e:
-                    conn.rollback() # Rollback on failure
+                    conn.rollback() # Rollback on failure to prevent partial data entry
                     st.error(f"Failed to submit request: {e}")
                 finally:
                     conn.close()
